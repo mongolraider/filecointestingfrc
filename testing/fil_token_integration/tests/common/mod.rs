@@ -10,7 +10,7 @@ use fvm_ipld_blockstore::Blockstore;
 use fvm_ipld_encoding::RawBytes;
 use fvm_shared::{
     address::Address, bigint::Zero, econ::TokenAmount, message::Message, state::StateTreeVersion,
-    version::NetworkVersion,
+    version::NetworkVersion, BLOCK_GAS_LIMIT,
 };
 use serde::Serialize;
 
@@ -60,7 +60,7 @@ pub fn load_actor_wasm(path: &str) -> Vec<u8> {
 /// Construct a Tester with the provided blockstore
 /// mainly cuts down on noise with importing the built-in actor bundle and network/state tree versions
 pub fn construct_tester<BS: Blockstore + Clone, E: Externs>(blockstore: &BS) -> Tester<BS, E> {
-    let bundle_root = bundle::import_bundle(&blockstore, actors_v9::BUNDLE_CAR).unwrap();
+    let bundle_root = bundle::import_bundle(&blockstore, actors_v10::BUNDLE_CAR).unwrap();
 
     Tester::new(NetworkVersion::V15, StateTreeVersion::V4, bundle_root, blockstore.clone()).unwrap()
 }
@@ -77,7 +77,7 @@ impl<B: Blockstore, E: Externs> TestHelpers for Tester<B, E> {
         let message = Message {
             from,
             to,
-            gas_limit: 99999999,
+            gas_limit: BLOCK_GAS_LIMIT,
             method_num,
             sequence: unsafe { SEQUENCE },
             params: if let Some(params) = params { params } else { RawBytes::default() },

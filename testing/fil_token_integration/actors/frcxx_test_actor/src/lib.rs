@@ -3,20 +3,22 @@ use frcxx_nft::receiver::FRCXXTokenReceived;
 use frcxx_nft::types::TransferParams;
 use frcxx_nft::{receiver::FRCXX_TOKEN_TYPE, state::TokenID};
 use fvm_actor_utils::receiver::UniversalReceiverParams;
+use fvm_ipld_encoding::ipld_block::IpldBlock;
 use fvm_ipld_encoding::{
     de::DeserializeOwned,
     tuple::{Deserialize_tuple, Serialize_tuple},
     RawBytes, DAG_CBOR,
 };
 use fvm_sdk as sdk;
+use fvm_shared::receipt::Receipt;
 use fvm_shared::{address::Address, bigint::Zero, econ::TokenAmount, error::ExitCode};
 use sdk::NO_DATA_BLOCK_ID;
 use serde::{Deserialize, Serialize};
 
 /// Grab the incoming parameters and convert from RawBytes to deserialized struct
 pub fn deserialize_params<O: DeserializeOwned>(params: u32) -> O {
-    let params = sdk::message::params_raw(params).unwrap().1;
-    let params = RawBytes::new(params);
+    let params = sdk::message::params_raw(params).unwrap().unwrap();
+    let params = RawBytes::new(params.data);
     params.deserialize().unwrap()
 }
 
@@ -66,27 +68,31 @@ pub fn action(action: TestAction) -> RawBytes {
 /// Execute the Transfer action
 fn transfer(token: Address, to: Address, token_ids: Vec<TokenID>, operator_data: RawBytes) -> u32 {
     let transfer_params = TransferParams { to, token_ids, operator_data };
-    let receipt = sdk::send::send(
+    let ret = sdk::send::send(
         &token,
         method_hash!("Transfer"),
-        RawBytes::serialize(&transfer_params).unwrap(),
+        IpldBlock::serialize_cbor(&transfer_params).unwrap(),
         TokenAmount::zero(),
     )
     .unwrap();
     // ignore failures at this level and return the transfer call receipt so caller can decide what to do
-    return_ipld(&receipt)
+    return_ipld(&Receipt {
+        exit_code: ret.exit_code,
+        return_data: ret.return_data.map_or(RawBytes::default(), |b| RawBytes::new(b.data)),
+        gas_used: 0,
+    })
 }
 
 /// Execute the Burn action
 fn burn(token: Address, token_ids: Vec<TokenID>) -> u32 {
-    let receipt = sdk::send::send(
+    let ret = sdk::send::send(
         &token,
         method_hash!("Burn"),
-        RawBytes::serialize(token_ids).unwrap(),
+        IpldBlock::serialize_cbor(&token_ids).unwrap(),
         TokenAmount::zero(),
     )
     .unwrap();
-    if !receipt.exit_code.is_success() {
+    if !ret.exit_code.is_success() {
         panic!("burn call failed");
     }
     NO_DATA_BLOCK_ID

@@ -1,5 +1,6 @@
 use std::mem;
 
+use fvm_ipld_encoding::ipld_block::IpldBlock;
 use fvm_ipld_encoding::tuple::{Deserialize_tuple, Serialize_tuple};
 use fvm_ipld_encoding::RawBytes;
 use fvm_shared::{address::Address, econ::TokenAmount, error::ExitCode};
@@ -46,6 +47,21 @@ pub enum ReceiverHookError {
     Messaging(#[from] MessagingError),
     #[error("receiver hook error from {address:?}: exit_code={exit_code:?}, return_data={return_data:?}")]
     Receiver { address: Address, exit_code: ExitCode, return_data: RawBytes },
+}
+
+impl ReceiverHookError {
+    /// Construct a new ReceiverHookError::Receiver
+    pub fn new_receiver_error(
+        address: Address,
+        exit_code: ExitCode,
+        return_data: Option<IpldBlock>,
+    ) -> Self {
+        Self::Receiver {
+            address,
+            exit_code,
+            return_data: return_data.map_or(RawBytes::default(), |b| RawBytes::new(b.data)),
+        }
+    }
 }
 
 impl From<&ReceiverHookError> for ExitCode {
@@ -119,23 +135,30 @@ impl<T: RecipientData> ReceiverHook<T> {
             payload: mem::take(&mut self.token_params), // once encoded and sent, we don't need this anymore
         };
 
-        let receipt = msg.send(
+        let ret = msg.send(
             &self.address,
             RECEIVER_HOOK_METHOD_NUM,
-            &RawBytes::serialize(&params)?,
+            IpldBlock::serialize_cbor(&params).map_err(|e| {
+                ReceiverHookError::IpldEncoding(fvm_ipld_encoding::Error {
+                    description: e.to_string(),
+                    protocol: fvm_ipld_encoding::CodecProtocol::Cbor,
+                })
+            })?,
             &TokenAmount::zero(),
         )?;
 
-        match receipt.exit_code {
+        match ret.exit_code {
             ExitCode::OK => {
-                self.result_data.as_mut().unwrap().set_recipient_data(receipt.return_data);
+                self.result_data.as_mut().unwrap().set_recipient_data(
+                    ret.return_data.map_or(RawBytes::default(), |b| RawBytes::new(b.data)),
+                );
                 Ok(self.result_data.take().unwrap())
             }
-            abort_code => Err(ReceiverHookError::Receiver {
-                address: self.address,
-                exit_code: abort_code,
-                return_data: receipt.return_data,
-            }),
+            abort_code => Err(ReceiverHookError::new_receiver_error(
+                self.address,
+                abort_code,
+                ret.return_data,
+            )),
         }
     }
 }

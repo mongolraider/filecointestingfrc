@@ -5,6 +5,7 @@ pub use error::TokenError;
 use fvm_actor_utils::messaging::{Messaging, MessagingError, RECEIVER_HOOK_METHOD_NUM};
 use fvm_actor_utils::receiver::{ReceiverHook, ReceiverHookError};
 use fvm_ipld_blockstore::Blockstore;
+use fvm_ipld_encoding::ipld_block::IpldBlock;
 use fvm_ipld_encoding::RawBytes;
 use fvm_shared::address::Address;
 use fvm_shared::econ::TokenAmount;
@@ -669,20 +670,20 @@ where
         token_receiver: &Address,
         params: FRC46TokenReceived,
     ) -> Result<()> {
-        let receipt = self.msg.send(
+        let ret = self.msg.send(
             token_receiver,
             RECEIVER_HOOK_METHOD_NUM,
-            &RawBytes::serialize(params)?,
+            IpldBlock::serialize_cbor(&params)?,
             &TokenAmount::zero(),
         )?;
 
-        match receipt.exit_code {
+        match ret.exit_code {
             ExitCode::OK => Ok(()),
-            abort_code => Err(ReceiverHookError::Receiver {
-                address: *token_receiver,
-                exit_code: abort_code,
-                return_data: receipt.return_data,
-            }
+            abort_code => Err(ReceiverHookError::new_receiver_error(
+                *token_receiver,
+                abort_code,
+                ret.return_data,
+            )
             .into()),
         }
     }
@@ -736,7 +737,9 @@ pub fn validate_allowance<'a>(a: &'a TokenAmount, name: &'static str) -> Result<
 mod test {
     use std::ops::Neg;
 
-    use fvm_actor_utils::messaging::{FakeMessenger, Messaging, MessagingError};
+    use fvm_actor_utils::messaging::{
+        FakeMessenger, Messaging, MessagingError, RECEIVER_HOOK_METHOD_NUM,
+    };
     use fvm_actor_utils::receiver::{ReceiverHookError, UniversalReceiverParams};
     use fvm_ipld_blockstore::MemoryBlockstore;
     use fvm_ipld_encoding::RawBytes;
@@ -782,8 +785,10 @@ mod test {
     }
 
     fn assert_last_hook_call_eq(messenger: &FakeMessenger, expected: FRC46TokenReceived) {
-        let last_called = messenger.last_message.borrow().clone().unwrap();
-        let last_called: UniversalReceiverParams = last_called.deserialize().unwrap();
+        let last_message = messenger.last_message.borrow().clone().unwrap();
+        assert_eq!(last_message.method, RECEIVER_HOOK_METHOD_NUM);
+        let last_called: UniversalReceiverParams =
+            last_message.params.unwrap().deserialize().unwrap();
         assert_eq!(last_called.type_, FRC46_TOKEN_TYPE);
         let last_called: FRC46TokenReceived = last_called.payload.deserialize().unwrap();
         assert_eq!(last_called, expected);
@@ -1350,12 +1355,15 @@ mod test {
             )
             .unwrap();
         token.flush().unwrap();
-        hook.call(token.msg()).unwrap();
+        let intermediate = hook.call(token.msg()).unwrap();
+        let ret = token.transfer_return(intermediate).unwrap();
 
         // owner has 100 - 60 = 40
         assert_eq!(token.balance_of(ALICE).unwrap(), TokenAmount::from_atto(40));
+        assert_eq!(ret.from_balance, TokenAmount::from_atto(40));
         // receiver has 0 + 60 = 60
         assert_eq!(token.balance_of(BOB).unwrap(), TokenAmount::from_atto(60));
+        assert_eq!(ret.to_balance, TokenAmount::from_atto(60));
         // total supply is unchanged
         assert_eq!(token.total_supply(), TokenAmount::from_atto(100));
 
@@ -1877,12 +1885,18 @@ mod test {
             )
             .unwrap();
         token.flush().unwrap();
-        hook.call(token.msg()).unwrap();
+        let intermediate = hook.call(token.msg()).unwrap();
+        let ret = token.transfer_from_return(intermediate).unwrap();
 
         // verify all balances are correct
         assert_eq!(token.balance_of(ALICE).unwrap(), TokenAmount::from_atto(40));
+        assert_eq!(ret.from_balance, TokenAmount::from_atto(40));
         assert_eq!(token.balance_of(BOB).unwrap(), TokenAmount::from_atto(60));
+        assert_eq!(ret.to_balance, TokenAmount::from_atto(60));
         assert_eq!(token.balance_of(CAROL).unwrap(), TokenAmount::zero());
+        // verify remaining allowance
+        assert_eq!(token.allowance(ALICE, CAROL).unwrap(), TokenAmount::from_atto(40));
+        assert_eq!(ret.allowance, TokenAmount::from_atto(40));
 
         // check receiver hook was called with correct shape
         assert_last_hook_call_eq(
